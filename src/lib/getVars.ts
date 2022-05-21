@@ -1,4 +1,5 @@
 import { join, resolve, parse } from "path";
+import { homedir } from "os";
 
 import * as core from "@actions/core";
 import { getInputAsArray } from "../util/actionUtils";
@@ -26,7 +27,10 @@ interface Vars {
 
 function buildCacheTargets(rootCacheDir: string, paths: string[]): CacheTarget[] {
   return paths.map((path): CacheTarget => {
-    const targetPath = resolve(workspace, path);
+    const originPath = path.startsWith('~/')?
+      join(homedir(), path.slice(2)) :
+      path;
+    const targetPath = resolve(workspace, originPath);
     const cachePath = join(rootCacheDir, path);
     return {
       origPath: path,

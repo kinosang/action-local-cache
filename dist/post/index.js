@@ -2894,6 +2894,7 @@ exports.flatten = (...args) => {
 "use strict";
 
 const taskManager = __nccwpck_require__(2708);
+const patternManager = __nccwpck_require__(8306);
 const async_1 = __nccwpck_require__(5679);
 const stream_1 = __nccwpck_require__(4630);
 const sync_1 = __nccwpck_require__(2405);
@@ -2927,7 +2928,7 @@ async function FastGlob(source, options) {
     FastGlob.stream = stream;
     function generateTasks(source, options) {
         assertPatternsInput(source);
-        const patterns = [].concat(source);
+        const patterns = patternManager.transform([].concat(source));
         const settings = new settings_1.default(options);
         return taskManager.generate(patterns, settings);
     }
@@ -2945,7 +2946,7 @@ async function FastGlob(source, options) {
     FastGlob.escapePath = escapePath;
 })(FastGlob || (FastGlob = {}));
 function getWorks(source, _Provider, options) {
-    const patterns = [].concat(source);
+    const patterns = patternManager.transform([].concat(source));
     const settings = new settings_1.default(options);
     const tasks = taskManager.generate(patterns, settings);
     const provider = new _Provider(settings);
@@ -2959,6 +2960,35 @@ function assertPatternsInput(input) {
     }
 }
 module.exports = FastGlob;
+
+
+/***/ }),
+
+/***/ 8306:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.removeDuplicateSlashes = exports.transform = void 0;
+/**
+ * Matches a sequence of two or more consecutive slashes, excluding the first two slashes at the beginning of the string.
+ * The latter is due to the presence of the device path at the beginning of the UNC path.
+ * @todo rewrite to negative lookbehind with the next major release.
+ */
+const DOUBLE_SLASH_RE = /(?!^)\/{2,}/g;
+function transform(patterns) {
+    return patterns.map((pattern) => removeDuplicateSlashes(pattern));
+}
+exports.transform = transform;
+/**
+ * This package only works with forward slashes as a path separator.
+ * Because of this, we cannot use the standard `path.normalize` method, because on Windows platform it will use of backslashes.
+ */
+function removeDuplicateSlashes(pattern) {
+    return pattern.replace(DOUBLE_SLASH_RE, '/');
+}
+exports.removeDuplicateSlashes = removeDuplicateSlashes;
 
 
 /***/ }),
@@ -3211,9 +3241,13 @@ class EntryFilter {
         const fullpath = utils.path.makeAbsolute(this._settings.cwd, entryPath);
         return utils.pattern.matchAny(fullpath, patternsRe);
     }
+    /**
+     * First, just trying to apply patterns to the path.
+     * Second, trying to apply patterns to the path with final slash.
+     */
     _isMatchToPatterns(entryPath, patternsRe) {
         const filepath = utils.path.removeLeadingDotSegment(entryPath);
-        return utils.pattern.matchAny(filepath, patternsRe);
+        return utils.pattern.matchAny(filepath, patternsRe) || utils.pattern.matchAny(filepath + '/', patternsRe);
     }
 }
 exports.default = EntryFilter;
@@ -3879,10 +3913,10 @@ const micromatch = __nccwpck_require__(6228);
 const GLOBSTAR = '**';
 const ESCAPE_SYMBOL = '\\';
 const COMMON_GLOB_SYMBOLS_RE = /[*?]|^!/;
-const REGEX_CHARACTER_CLASS_SYMBOLS_RE = /\[.*]/;
-const REGEX_GROUP_SYMBOLS_RE = /(?:^|[^!*+?@])\(.*\|.*\)/;
-const GLOB_EXTENSION_SYMBOLS_RE = /[!*+?@]\(.*\)/;
-const BRACE_EXPANSIONS_SYMBOLS_RE = /{.*(?:,|\.\.).*}/;
+const REGEX_CHARACTER_CLASS_SYMBOLS_RE = /\[[^[]*]/;
+const REGEX_GROUP_SYMBOLS_RE = /(?:^|[^!*+?@])\([^(]*\|[^|]*\)/;
+const GLOB_EXTENSION_SYMBOLS_RE = /[!*+?@]\([^(]*\)/;
+const BRACE_EXPANSION_SEPARATORS_RE = /,|\.\./;
 function isStaticPattern(pattern, options = {}) {
     return !isDynamicPattern(pattern, options);
 }
@@ -3909,12 +3943,24 @@ function isDynamicPattern(pattern, options = {}) {
     if (options.extglob !== false && GLOB_EXTENSION_SYMBOLS_RE.test(pattern)) {
         return true;
     }
-    if (options.braceExpansion !== false && BRACE_EXPANSIONS_SYMBOLS_RE.test(pattern)) {
+    if (options.braceExpansion !== false && hasBraceExpansion(pattern)) {
         return true;
     }
     return false;
 }
 exports.isDynamicPattern = isDynamicPattern;
+function hasBraceExpansion(pattern) {
+    const openingBraceIndex = pattern.indexOf('{');
+    if (openingBraceIndex === -1) {
+        return false;
+    }
+    const closingBraceIndex = pattern.indexOf('}', openingBraceIndex + 1);
+    if (closingBraceIndex === -1) {
+        return false;
+    }
+    const braceContent = pattern.slice(openingBraceIndex, closingBraceIndex);
+    return BRACE_EXPANSION_SEPARATORS_RE.test(braceContent);
+}
 function convertToPositivePattern(pattern) {
     return isNegativePattern(pattern) ? pattern.slice(1) : pattern;
 }
@@ -4304,6 +4350,7 @@ function queueAsPromised (context, worker, concurrency) {
 
   queue.push = push
   queue.unshift = unshift
+  queue.drained = drained
 
   return queue
 
@@ -4341,6 +4388,19 @@ function queueAsPromised (context, worker, concurrency) {
     // make the error bubble up to the user but
     // not lead to a unhandledRejection
     p.catch(noop)
+
+    return p
+  }
+
+  function drained () {
+    var previousDrain = queue.drain
+
+    var p = new Promise(function (resolve) {
+      queue.drain = function () {
+        previousDrain()
+        resolve()
+      }
+    })
 
     return p
   }
@@ -4698,8 +4758,128 @@ module.exports = function isExtglob(str) {
 
 var isExtglob = __nccwpck_require__(6435);
 var chars = { '{': '}', '(': ')', '[': ']'};
-var strictRegex = /\\(.)|(^!|\*|[\].+)]\?|\[[^\\\]]+\]|\{[^\\}]+\}|\(\?[:!=][^\\)]+\)|\([^|]+\|[^\\)]+\))/;
-var relaxedRegex = /\\(.)|(^!|[*?{}()[\]]|\(\?)/;
+var strictCheck = function(str) {
+  if (str[0] === '!') {
+    return true;
+  }
+  var index = 0;
+  var pipeIndex = -2;
+  var closeSquareIndex = -2;
+  var closeCurlyIndex = -2;
+  var closeParenIndex = -2;
+  var backSlashIndex = -2;
+  while (index < str.length) {
+    if (str[index] === '*') {
+      return true;
+    }
+
+    if (str[index + 1] === '?' && /[\].+)]/.test(str[index])) {
+      return true;
+    }
+
+    if (closeSquareIndex !== -1 && str[index] === '[' && str[index + 1] !== ']') {
+      if (closeSquareIndex < index) {
+        closeSquareIndex = str.indexOf(']', index);
+      }
+      if (closeSquareIndex > index) {
+        if (backSlashIndex === -1 || backSlashIndex > closeSquareIndex) {
+          return true;
+        }
+        backSlashIndex = str.indexOf('\\', index);
+        if (backSlashIndex === -1 || backSlashIndex > closeSquareIndex) {
+          return true;
+        }
+      }
+    }
+
+    if (closeCurlyIndex !== -1 && str[index] === '{' && str[index + 1] !== '}') {
+      closeCurlyIndex = str.indexOf('}', index);
+      if (closeCurlyIndex > index) {
+        backSlashIndex = str.indexOf('\\', index);
+        if (backSlashIndex === -1 || backSlashIndex > closeCurlyIndex) {
+          return true;
+        }
+      }
+    }
+
+    if (closeParenIndex !== -1 && str[index] === '(' && str[index + 1] === '?' && /[:!=]/.test(str[index + 2]) && str[index + 3] !== ')') {
+      closeParenIndex = str.indexOf(')', index);
+      if (closeParenIndex > index) {
+        backSlashIndex = str.indexOf('\\', index);
+        if (backSlashIndex === -1 || backSlashIndex > closeParenIndex) {
+          return true;
+        }
+      }
+    }
+
+    if (pipeIndex !== -1 && str[index] === '(' && str[index + 1] !== '|') {
+      if (pipeIndex < index) {
+        pipeIndex = str.indexOf('|', index);
+      }
+      if (pipeIndex !== -1 && str[pipeIndex + 1] !== ')') {
+        closeParenIndex = str.indexOf(')', pipeIndex);
+        if (closeParenIndex > pipeIndex) {
+          backSlashIndex = str.indexOf('\\', pipeIndex);
+          if (backSlashIndex === -1 || backSlashIndex > closeParenIndex) {
+            return true;
+          }
+        }
+      }
+    }
+
+    if (str[index] === '\\') {
+      var open = str[index + 1];
+      index += 2;
+      var close = chars[open];
+
+      if (close) {
+        var n = str.indexOf(close, index);
+        if (n !== -1) {
+          index = n + 1;
+        }
+      }
+
+      if (str[index] === '!') {
+        return true;
+      }
+    } else {
+      index++;
+    }
+  }
+  return false;
+};
+
+var relaxedCheck = function(str) {
+  if (str[0] === '!') {
+    return true;
+  }
+  var index = 0;
+  while (index < str.length) {
+    if (/[*?{}()[\]]/.test(str[index])) {
+      return true;
+    }
+
+    if (str[index] === '\\') {
+      var open = str[index + 1];
+      index += 2;
+      var close = chars[open];
+
+      if (close) {
+        var n = str.indexOf(close, index);
+        if (n !== -1) {
+          index = n + 1;
+        }
+      }
+
+      if (str[index] === '!') {
+        return true;
+      }
+    } else {
+      index++;
+    }
+  }
+  return false;
+};
 
 module.exports = function isGlob(str, options) {
   if (typeof str !== 'string' || str === '') {
@@ -4710,32 +4890,14 @@ module.exports = function isGlob(str, options) {
     return true;
   }
 
-  var regex = strictRegex;
-  var match;
+  var check = strictCheck;
 
-  // optionally relax regex
+  // optionally relax check
   if (options && options.strict === false) {
-    regex = relaxedRegex;
+    check = relaxedCheck;
   }
 
-  while ((match = regex.exec(str))) {
-    if (match[2]) return true;
-    var idx = match.index + match[0].length;
-
-    // if an open bracket/brace/paren is escaped,
-    // set the index to the next closing character
-    var open = match[1];
-    var close = open ? chars[open] : null;
-    if (open && close) {
-      var n = str.indexOf(close, idx);
-      if (n !== -1) {
-        idx = n + 1;
-      }
-    }
-
-    str = str.slice(idx);
-  }
-  return false;
+  return check(str);
 };
 
 
@@ -5361,10 +5523,10 @@ micromatch.not = (list, patterns, options = {}) => {
     items.push(state.output);
   };
 
-  let matches = micromatch(list, patterns, { ...options, onResult });
+  let matches = new Set(micromatch(list, patterns, { ...options, onResult }));
 
   for (let item of items) {
-    if (!matches.includes(item)) {
+    if (!matches.has(item)) {
       result.add(item);
     }
   }
@@ -5614,7 +5776,7 @@ micromatch.scan = (...args) => picomatch.scan(...args);
  *
  * ```js
  * const mm = require('micromatch');
- * const state = mm(pattern[, options]);
+ * const state = mm.parse(pattern[, options]);
  * ```
  * @param {String} `glob`
  * @param {Object} `options`
@@ -6129,7 +6291,14 @@ const parse = (input, options) => {
       }
 
       if (token.inner.includes('*') && (rest = remaining()) && /^\.[^\\/.]+$/.test(rest)) {
-        output = token.close = `)${rest})${extglobStar})`;
+        // Any non-magical string (`.ts`) or even nested expression (`.{ts,tsx}`) can follow after the closing parenthesis.
+        // In this case, we need to parse the string and use it in the output of the original pattern.
+        // Suitable patterns: `/!(*.d).ts`, `/!(*.d).{ts,tsx}`, `**/!(*-dbg).@(js)`.
+        //
+        // Disabling the `fastpaths` option due to a problem with parsing strings as `.ts` in the pattern like `**/!(*.d).ts`.
+        const expression = parse(rest, { ...options, fastpaths: false }).output;
+
+        output = token.close = `)${expression})${extglobStar})`;
       }
 
       if (token.prev.type === 'bos') {
@@ -8354,6 +8523,8 @@ var io = __nccwpck_require__(7436);
 var io_util = __nccwpck_require__(1962);
 // EXTERNAL MODULE: external "path"
 var external_path_ = __nccwpck_require__(5622);
+// EXTERNAL MODULE: external "os"
+var external_os_ = __nccwpck_require__(2087);
 // EXTERNAL MODULE: ./node_modules/fast-glob/out/index.js
 var out = __nccwpck_require__(3664);
 ;// CONCATENATED MODULE: ./src/util/actionUtils.ts
@@ -8387,11 +8558,15 @@ var _a;
 
 
 
+
 const { GITHUB_REPOSITORY, RUNNER_TOOL_CACHE } = process.env;
 const workspace = (_a = process.env["GITHUB_WORKSPACE"]) !== null && _a !== void 0 ? _a : process.cwd();
 function buildCacheTargets(rootCacheDir, paths) {
     return paths.map((path) => {
-        const targetPath = (0,external_path_.resolve)(workspace, path);
+        const originPath = path.startsWith('~/') ?
+            (0,external_path_.join)((0,external_os_.homedir)(), path.slice(2)) :
+            path;
+        const targetPath = (0,external_path_.resolve)(workspace, originPath);
         const cachePath = (0,external_path_.join)(rootCacheDir, path);
         return {
             origPath: path,
